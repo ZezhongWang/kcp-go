@@ -680,7 +680,7 @@ func (s *UDPSession) readLoopIPv6() {
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
-				msg := msgs[i]
+				msg := &msgs[i]
 				// make sure the packet is from the same source
 				if src == "" { // set source address if nil
 					src = msg.Addr.String()
@@ -695,7 +695,7 @@ func (s *UDPSession) readLoopIPv6() {
 				}
 
 				// source and size has validated
-				s.packetInput(msgs[i].Buffers[0][:msg.N])
+				s.packetInput(msg.Buffers[0][:msg.N])
 			}
 		} else {
 			s.chReadError <- err
@@ -714,7 +714,7 @@ func (s *UDPSession) readLoopIPv4() {
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
-				msg := msgs[i]
+				msg := &msgs[i]
 				// make sure the packet is from the same source
 				if src == "" { // set source address if nil
 					src = msg.Addr.String()
@@ -729,7 +729,7 @@ func (s *UDPSession) readLoopIPv4() {
 				}
 
 				// source and size has validated
-				s.packetInput(msgs[i].Buffers[0][:msg.N])
+				s.packetInput(msg.Buffers[0][:msg.N])
 			}
 		} else {
 			s.chReadError <- err
