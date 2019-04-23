@@ -635,40 +635,92 @@ func (s *UDPSession) kcpInput(data []byte) {
 
 // the read loop for a client session
 func (s *UDPSession) readLoop() {
-	buf := make([]byte, mtuLimit)
+	addr, _ := net.ResolveUDPAddr("udp", s.conn.LocalAddr().String())
+	if addr.IP.To4() != nil {
+		s.readLoopIPV4()
+	} else {
+		s.readLoopIPV6()
+	}
+}
+
+// packet preprocessing
+func (s *UDPSession) preprocess(data []byte) {
+	dataValid := false
+	if s.block != nil {
+		s.block.Decrypt(data, data)
+		data = data[nonceSize:]
+		checksum := crc32.ChecksumIEEE(data[crcSize:])
+		if checksum == binary.LittleEndian.Uint32(data) {
+			data = data[crcSize:]
+			dataValid = true
+		} else {
+			atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
+		}
+	} else if s.block == nil {
+		dataValid = true
+	}
+
+	if dataValid {
+		s.kcpInput(data)
+	}
+}
+
+func (s *UDPSession) readLoopIPV6() {
+	msgs := make([]ipv4.Message, 65536/mtuLimit)
+	for k := range msgs {
+		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
+	}
 	var src string
+	conn := ipv4.NewPacketConn(s.conn)
 	for {
-		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
+		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			// make sure the packet is from the same source
 			if src == "" { // set source address
-				src = addr.String()
-			} else if addr.String() != src {
+				src = msgs[0].Addr.String()
+			} else if msgs[0].Addr.String() != src {
 				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				continue
 			}
 
-			if n >= s.headerSize+IKCP_OVERHEAD {
-				data := buf[:n]
-				dataValid := false
-				if s.block != nil {
-					s.block.Decrypt(data, data)
-					data = data[nonceSize:]
-					checksum := crc32.ChecksumIEEE(data[crcSize:])
-					if checksum == binary.LittleEndian.Uint32(data) {
-						data = data[crcSize:]
-						dataValid = true
-					} else {
-						atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
-					}
-				} else if s.block == nil {
-					dataValid = true
+			for i := 0; i < count; i++ {
+				msg := msgs[i]
+				if msg.N >= s.headerSize+IKCP_OVERHEAD {
+					s.preprocess(msgs[i].Buffers[0][:msg.N])
+				} else {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				}
+			}
+		} else {
+			s.chReadError <- err
+			return
+		}
+	}
+}
 
-				if dataValid {
-					s.kcpInput(data)
-				}
-			} else {
+func (s *UDPSession) readLoopIPV4() {
+	msgs := make([]ipv4.Message, 65536/mtuLimit)
+	for k := range msgs {
+		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
+	}
+	var src string
+	conn := ipv4.NewPacketConn(s.conn)
+	for {
+		if count, err := conn.ReadBatch(msgs, 0); err == nil {
+			// make sure the packet is from the same source
+			if src == "" { // set source address
+				src = msgs[0].Addr.String()
+			} else if msgs[0].Addr.String() != src {
 				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+				continue
+			}
+
+			for i := 0; i < count; i++ {
+				msg := msgs[i]
+				if msg.N >= s.headerSize+IKCP_OVERHEAD {
+					s.preprocess(msgs[i].Buffers[0][:msg.N])
+				} else {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+				}
 			}
 		} else {
 			s.chReadError <- err
@@ -795,11 +847,13 @@ func (l *Listener) SetWriteBuffer(bytes int) error {
 
 // SetDSCP sets the 6bit DSCP field of IP header
 func (l *Listener) SetDSCP(dscp int) error {
-	if nc, ok := l.conn.(net.Conn); ok {
-		if err := ipv4.NewConn(nc).SetTOS(dscp << 2); err != nil {
+	if nc, ok := l.conn.(*net.UDPConn); ok {
+		addr, _ := net.ResolveUDPAddr("udp", nc.LocalAddr().String())
+		if addr.IP.To4() != nil {
+			return ipv4.NewConn(nc).SetTOS(dscp << 2)
+		} else {
 			return ipv6.NewConn(nc).SetTrafficClass(dscp)
 		}
-		return nil
 	}
 	return errors.New(errInvalidOperation)
 }
@@ -913,17 +967,7 @@ func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
 func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
-	// network type detection
-	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
-	if err != nil {
-		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
-	}
-	network := "udp4"
-	if udpaddr.IP.To4() == nil {
-		network = "udp"
-	}
-
-	conn, err := net.ListenUDP(network, nil)
+	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.DialUDP")
 	}
