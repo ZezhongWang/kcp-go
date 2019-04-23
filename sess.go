@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -671,12 +672,22 @@ func (s *UDPSession) readLoop() {
 }
 
 func (s *UDPSession) readLoopIPv6() {
-	msgs := make([]ipv6.Message, batchSize)
+	var src string
+	var msgs []ipv6.Message
+
+	switch runtime.GOOS {
+	case "linux":
+		msgs = make([]ipv6.Message, batchSize)
+	default:
+		msgs = make([]ipv6.Message, 1)
+	}
+
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
-	var src string
+
 	conn := ipv6.NewPacketConn(s.conn)
+
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
@@ -705,11 +716,20 @@ func (s *UDPSession) readLoopIPv6() {
 }
 
 func (s *UDPSession) readLoopIPv4() {
-	msgs := make([]ipv4.Message, batchSize)
+	var src string
+	var msgs []ipv4.Message
+
+	switch runtime.GOOS {
+	case "linux":
+		msgs = make([]ipv4.Message, batchSize)
+	default:
+		msgs = make([]ipv4.Message, 1)
+	}
+
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
-	var src string
+
 	conn := ipv4.NewPacketConn(s.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
@@ -821,12 +841,19 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 }
 
 func (l *Listener) monitorIPv4() {
-	conn := ipv4.NewPacketConn(l.conn)
-	msgs := make([]ipv4.Message, batchSize)
+	var msgs []ipv4.Message
+	switch runtime.GOOS {
+	case "linux":
+		msgs = make([]ipv4.Message, batchSize)
+	default:
+		msgs = make([]ipv4.Message, 1)
+	}
+
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
 
+	conn := ipv4.NewPacketConn(l.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
@@ -844,12 +871,19 @@ func (l *Listener) monitorIPv4() {
 }
 
 func (l *Listener) monitorIPv6() {
-	conn := ipv6.NewPacketConn(l.conn)
-	msgs := make([]ipv6.Message, batchSize)
+	var msgs []ipv6.Message
+	switch runtime.GOOS {
+	case "linux":
+		msgs = make([]ipv6.Message, batchSize)
+	default:
+		msgs = make([]ipv6.Message, 1)
+	}
+
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
 
+	conn := ipv4.NewPacketConn(l.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
