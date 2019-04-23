@@ -637,9 +637,9 @@ func (s *UDPSession) kcpInput(data []byte) {
 func (s *UDPSession) readLoop() {
 	addr, _ := net.ResolveUDPAddr("udp", s.conn.LocalAddr().String())
 	if addr.IP.To4() != nil {
-		s.readLoopIPV4()
+		s.readLoopIPv4()
 	} else {
-		s.readLoopIPV6()
+		s.readLoopIPv6()
 	}
 }
 
@@ -665,13 +665,13 @@ func (s *UDPSession) preprocess(data []byte) {
 	}
 }
 
-func (s *UDPSession) readLoopIPV6() {
-	msgs := make([]ipv4.Message, 65536/mtuLimit)
+func (s *UDPSession) readLoopIPv6() {
+	msgs := make([]ipv6.Message, 65536/mtuLimit)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
 	var src string
-	conn := ipv4.NewPacketConn(s.conn)
+	conn := ipv6.NewPacketConn(s.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
 			// make sure the packet is from the same source
@@ -697,7 +697,7 @@ func (s *UDPSession) readLoopIPV6() {
 	}
 }
 
-func (s *UDPSession) readLoopIPV4() {
+func (s *UDPSession) readLoopIPv4() {
 	msgs := make([]ipv4.Message, 65536/mtuLimit)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
@@ -751,77 +751,181 @@ type (
 
 // monitor incoming data for all connections of server
 func (l *Listener) monitor() {
+	addr, _ := net.ResolveUDPAddr("udp", l.conn.LocalAddr().String())
+	if addr.IP.To4() != nil {
+		l.monitorIPv4()
+	} else {
+		l.monitorIPv6()
+	}
+}
+
+func (l *Listener) monitorIPv4() {
 	// a cache for session object last used
 	var lastAddr string
 	var lastSession *UDPSession
-	buf := make([]byte, mtuLimit)
+	conn := ipv4.NewPacketConn(l.conn)
+	msgs := make([]ipv6.Message, 65536/mtuLimit)
+	for k := range msgs {
+		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
+	}
+
 	for {
-		if n, from, err := l.conn.ReadFrom(buf); err == nil {
-			if n >= l.headerSize+IKCP_OVERHEAD {
-				data := buf[:n]
-				dataValid := false
-				if l.block != nil {
-					l.block.Decrypt(data, data)
-					data = data[nonceSize:]
-					checksum := crc32.ChecksumIEEE(data[crcSize:])
-					if checksum == binary.LittleEndian.Uint32(data) {
-						data = data[crcSize:]
-						dataValid = true
-					} else {
-						atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
-					}
-				} else if l.block == nil {
-					dataValid = true
-				}
-
-				if dataValid {
-					addr := from.String()
-					var s *UDPSession
-					var ok bool
-
-					// the packets received from an address always come in batch,
-					// cache the session for next packet, without querying map.
-					if addr == lastAddr {
-						s, ok = lastSession, true
-					} else {
-						l.sessionLock.Lock()
-						if s, ok = l.sessions[addr]; ok {
-							lastSession = s
-							lastAddr = addr
+		if count, err := conn.ReadBatch(msgs, 0); err == nil {
+			for i := 0; i < count; i++ {
+				msg := msgs[i]
+				if msg.N >= l.headerSize+IKCP_OVERHEAD {
+					data := msg.Buffers[0][:msg.N]
+					dataValid := false
+					if l.block != nil {
+						l.block.Decrypt(data, data)
+						data = data[nonceSize:]
+						checksum := crc32.ChecksumIEEE(data[crcSize:])
+						if checksum == binary.LittleEndian.Uint32(data) {
+							data = data[crcSize:]
+							dataValid = true
+						} else {
+							atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
 						}
-						l.sessionLock.Unlock()
+					} else if l.block == nil {
+						dataValid = true
 					}
 
-					if !ok { // new session
-						if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
-							var conv uint32
-							convValid := false
-							if l.fecDecoder != nil {
-								isfec := binary.LittleEndian.Uint16(data[4:])
-								if isfec == typeData {
-									conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
+					if dataValid {
+						addr := msg.Addr.String()
+						var s *UDPSession
+						var ok bool
+
+						// the packets received from an address always come in batch,
+						// cache the session for next packet, without querying map.
+						if addr == lastAddr {
+							s, ok = lastSession, true
+						} else {
+							l.sessionLock.Lock()
+							if s, ok = l.sessions[addr]; ok {
+								lastSession = s
+								lastAddr = addr
+							}
+							l.sessionLock.Unlock()
+						}
+
+						if !ok { // new session
+							if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
+								var conv uint32
+								convValid := false
+								if l.fecDecoder != nil {
+									isfec := binary.LittleEndian.Uint16(data[4:])
+									if isfec == typeData {
+										conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
+										convValid = true
+									}
+								} else {
+									conv = binary.LittleEndian.Uint32(data)
 									convValid = true
 								}
-							} else {
-								conv = binary.LittleEndian.Uint32(data)
-								convValid = true
-							}
 
-							if convValid { // creates a new session only if the 'conv' field in kcp is accessible
-								s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, from, l.block)
-								s.kcpInput(data)
-								l.sessionLock.Lock()
-								l.sessions[addr] = s
-								l.sessionLock.Unlock()
-								l.chAccepts <- s
+								if convValid { // creates a new session only if the 'conv' field in kcp is accessible
+									s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, msg.Addr, l.block)
+									s.kcpInput(data)
+									l.sessionLock.Lock()
+									l.sessions[addr] = s
+									l.sessionLock.Unlock()
+									l.chAccepts <- s
+								}
 							}
+						} else {
+							s.kcpInput(data)
 						}
-					} else {
-						s.kcpInput(data)
 					}
+				} else {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				}
-			} else {
-				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+			}
+		} else {
+			return
+		}
+	}
+}
+
+func (l *Listener) monitorIPv6() {
+	// a cache for session object last used
+	var lastAddr string
+	var lastSession *UDPSession
+	conn := ipv6.NewPacketConn(l.conn)
+	msgs := make([]ipv6.Message, 65536/mtuLimit)
+	for k := range msgs {
+		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
+	}
+
+	for {
+		if count, err := conn.ReadBatch(msgs, 0); err == nil {
+			for i := 0; i < count; i++ {
+				msg := msgs[i]
+				if msg.N >= l.headerSize+IKCP_OVERHEAD {
+					data := msg.Buffers[0][:msg.N]
+					dataValid := false
+					if l.block != nil {
+						l.block.Decrypt(data, data)
+						data = data[nonceSize:]
+						checksum := crc32.ChecksumIEEE(data[crcSize:])
+						if checksum == binary.LittleEndian.Uint32(data) {
+							data = data[crcSize:]
+							dataValid = true
+						} else {
+							atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
+						}
+					} else if l.block == nil {
+						dataValid = true
+					}
+
+					if dataValid {
+						addr := msg.Addr.String()
+						var s *UDPSession
+						var ok bool
+
+						// the packets received from an address always come in batch,
+						// cache the session for next packet, without querying map.
+						if addr == lastAddr {
+							s, ok = lastSession, true
+						} else {
+							l.sessionLock.Lock()
+							if s, ok = l.sessions[addr]; ok {
+								lastSession = s
+								lastAddr = addr
+							}
+							l.sessionLock.Unlock()
+						}
+
+						if !ok { // new session
+							if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
+								var conv uint32
+								convValid := false
+								if l.fecDecoder != nil {
+									isfec := binary.LittleEndian.Uint16(data[4:])
+									if isfec == typeData {
+										conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
+										convValid = true
+									}
+								} else {
+									conv = binary.LittleEndian.Uint32(data)
+									convValid = true
+								}
+
+								if convValid { // creates a new session only if the 'conv' field in kcp is accessible
+									s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, msg.Addr, l.block)
+									s.kcpInput(data)
+									l.sessionLock.Lock()
+									l.sessions[addr] = s
+									l.sessionLock.Unlock()
+									l.chAccepts <- s
+								}
+							}
+						} else {
+							s.kcpInput(data)
+						}
+					}
+				} else {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+				}
 			}
 		} else {
 			return
