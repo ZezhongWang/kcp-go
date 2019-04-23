@@ -679,22 +679,23 @@ func (s *UDPSession) readLoopIPv6() {
 	conn := ipv6.NewPacketConn(s.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
-			// make sure the packet is from the same source
-			if src == "" { // set source address
-				src = msgs[0].Addr.String()
-			} else if msgs[0].Addr.String() != src {
-				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
-				continue
-			}
-
 			for i := 0; i < count; i++ {
 				msg := msgs[i]
-				if msg.N >= s.headerSize+IKCP_OVERHEAD {
-					data := msgs[i].Buffers[0][:msg.N]
-					s.packetInput(data)
-				} else {
+				// make sure the packet is from the same source
+				if src == "" { // set source address if nil
+					src = msg.Addr.String()
+				} else if msg.Addr.String() != src {
 					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+					continue
 				}
+
+				if msg.N < s.headerSize+IKCP_OVERHEAD {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+					continue
+				}
+
+				// source and size has validated
+				s.packetInput(msgs[i].Buffers[0][:msg.N])
 			}
 		} else {
 			s.chReadError <- err
@@ -712,22 +713,23 @@ func (s *UDPSession) readLoopIPv4() {
 	conn := ipv4.NewPacketConn(s.conn)
 	for {
 		if count, err := conn.ReadBatch(msgs, 0); err == nil {
-			// make sure the packet is from the same source
-			if src == "" { // set source address
-				src = msgs[0].Addr.String()
-			} else if msgs[0].Addr.String() != src {
-				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
-				continue
-			}
-
 			for i := 0; i < count; i++ {
 				msg := msgs[i]
-				if msg.N >= s.headerSize+IKCP_OVERHEAD {
-					data := msgs[i].Buffers[0][:msg.N]
-					s.packetInput(data)
-				} else {
+				// make sure the packet is from the same source
+				if src == "" { // set source address if nil
+					src = msg.Addr.String()
+				} else if msg.Addr.String() != src {
 					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+					continue
 				}
+
+				if msg.N < s.headerSize+IKCP_OVERHEAD {
+					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+					continue
+				}
+
+				// source and size has validated
+				s.packetInput(msgs[i].Buffers[0][:msg.N])
 			}
 		} else {
 			s.chReadError <- err
