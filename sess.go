@@ -40,6 +40,9 @@ const (
 
 	// accept backlog
 	acceptBacklog = 128
+
+	// ReadBatch() message size
+	batchSize = 16
 )
 
 const (
@@ -643,8 +646,8 @@ func (s *UDPSession) readLoop() {
 	}
 }
 
-// packet preprocessing
-func (s *UDPSession) preprocess(data []byte) {
+// packet preprocessing stage, decrypting and validation
+func (s *UDPSession) preprocess(data []byte) bool {
 	dataValid := false
 	if s.block != nil {
 		s.block.Decrypt(data, data)
@@ -660,13 +663,11 @@ func (s *UDPSession) preprocess(data []byte) {
 		dataValid = true
 	}
 
-	if dataValid {
-		s.kcpInput(data)
-	}
+	return dataValid
 }
 
 func (s *UDPSession) readLoopIPv6() {
-	msgs := make([]ipv6.Message, 65536/mtuLimit)
+	msgs := make([]ipv6.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
@@ -685,7 +686,10 @@ func (s *UDPSession) readLoopIPv6() {
 			for i := 0; i < count; i++ {
 				msg := msgs[i]
 				if msg.N >= s.headerSize+IKCP_OVERHEAD {
-					s.preprocess(msgs[i].Buffers[0][:msg.N])
+					data := msgs[i].Buffers[0][:msg.N]
+					if s.preprocess(data) {
+						s.kcpInput(data)
+					}
 				} else {
 					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				}
@@ -698,7 +702,7 @@ func (s *UDPSession) readLoopIPv6() {
 }
 
 func (s *UDPSession) readLoopIPv4() {
-	msgs := make([]ipv4.Message, 65536/mtuLimit)
+	msgs := make([]ipv4.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
@@ -717,7 +721,10 @@ func (s *UDPSession) readLoopIPv4() {
 			for i := 0; i < count; i++ {
 				msg := msgs[i]
 				if msg.N >= s.headerSize+IKCP_OVERHEAD {
-					s.preprocess(msgs[i].Buffers[0][:msg.N])
+					data := msgs[i].Buffers[0][:msg.N]
+					if s.preprocess(data) {
+						s.kcpInput(data)
+					}
 				} else {
 					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				}
@@ -764,7 +771,7 @@ func (l *Listener) monitorIPv4() {
 	var lastAddr string
 	var lastSession *UDPSession
 	conn := ipv4.NewPacketConn(l.conn)
-	msgs := make([]ipv6.Message, 65536/mtuLimit)
+	msgs := make([]ipv6.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
@@ -851,7 +858,7 @@ func (l *Listener) monitorIPv6() {
 	var lastAddr string
 	var lastSession *UDPSession
 	conn := ipv6.NewPacketConn(l.conn)
-	msgs := make([]ipv6.Message, 65536/mtuLimit)
+	msgs := make([]ipv6.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
